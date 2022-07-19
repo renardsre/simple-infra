@@ -1,0 +1,133 @@
+name: golang-pipeline
+
+on:
+  push:
+    branches: 
+      - main
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+    paths:
+      - 'app/**'
+      - '.github/**'
+  workflow_dispatch:
+    inputs:
+      logLevel:
+        description: 'Log level'
+        required: true
+        default: 'debug' 
+        type: choice
+        options:
+        - info
+        - warning
+        - debug 
+
+jobs:
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+
+    - name: Checkout Central Actions Repo
+      uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v3
+      with:
+        go-version: 1.18
+
+    - name: Install dependencies
+      run: |
+        cd app
+        go mod download
+        go mod tidy
+        npm install -location=global snyk
+
+    - name: Run Snyk to check for vulnerabilities on golang code
+      run: snyk code test app --sarif-file-output=snyk-code.sarif
+      continue-on-error: true
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+    - name: Upload result to GitHub Code Scanning
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: snyk-code.sarif
+
+    - name: Run Snyk to check for vulnerabilities on golang modules
+      run: snyk test app --sarif-file-output=snyk-depend.sarif
+      continue-on-error: true
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+    - name: Upload result to GitHub Dependencies Scanning
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: snyk-depend.sarif
+
+  # sonarqube:
+  #   needs: unittest
+  #   name: SonarQube Trigger
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #   - name: Checking out
+  #     uses: actions/checkout@master
+  #     with:
+  #       fetch-depth: 0
+
+  #   - name: SonarQube Scan
+  #     uses: kitabisa/sonarqube-action@v1.2.0
+  #     with:
+  #       host: ${{ secrets.SONARQUBE_HOST }}
+  #       login: ${{ secrets.SONARQUBE_TOKEN }}
+  #       projectBaseDir: "app/"
+  #       projectKey: "app-bmi-app"
+
+  release-staging:
+    needs: 
+      # - unittest
+      - security
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+    
+    - uses: actions/checkout@v3
+
+    - name: Release app to Heroku to staging environment.
+      uses: gonuit/heroku-docker-deploy@v1.3.3
+      with:
+        email: ${{ secrets.HEROKU_EMAIL }}
+        heroku_api_key: ${{ secrets.HEROKU_API_KEY }}
+        heroku_app_name: "bmi-api-stag"
+        dockerfile_directory: ./app
+        dockerfile_name: dockerfile
+        docker_options: "--no-cache"
+        process_type: web 
+        docker_build_args: |
+          ENVIRONMENT
+      env:
+        ENVIRONMENT: staging
+
+  release-production:
+    needs: 
+      # - unittest
+      - security
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+    
+    - uses: actions/checkout@v3
+
+    - name: Release app to Heroku to production environment.
+      uses: gonuit/heroku-docker-deploy@v1.3.3
+      with:
+        email: ${{ secrets.HEROKU_EMAIL }}
+        heroku_api_key: ${{ secrets.HEROKU_API_KEY }}
+        heroku_app_name: "bmi-api-prod"
+        dockerfile_directory: ./app
+        dockerfile_name: dockerfile
+        docker_options: "--no-cache"
+        process_type: web
+        docker_build_args: |
+          ENVIRONMENT
+      env:
+        ENVIRONMENT: production
